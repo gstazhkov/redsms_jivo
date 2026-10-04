@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import time
 from pathlib import Path
@@ -56,6 +57,8 @@ class SupportStore:
                     ON operator_handoffs(created_at);
                 """
             )
+        if os.name == "posix" and self.path != ":memory:":
+            os.chmod(self.path, 0o600)
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=10)

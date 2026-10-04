@@ -1,8 +1,11 @@
 import importlib
 import json
 import os
+import stat
 import sqlite3
 import sys
+
+from support_store import SupportStore
 
 
 def reload_module(monkeypatch, tmp_path, templates_path=None):
@@ -40,6 +43,15 @@ def test_find_template_returns_match_and_counts_metric(monkeypatch, tmp_path):
     assert result is not None
     assert result["id"] == 2
     assert module.get_match_metrics()["matched"] >= 1
+
+
+def test_template_search_log_does_not_include_customer_text(monkeypatch, tmp_path, caplog):
+    module = reload_module(monkeypatch, tmp_path)
+    customer_text = "секретный текст обращения 918273"
+
+    module.find_template(customer_text)
+
+    assert customer_text not in caplog.text
 
 
 def test_find_template_counts_not_found(monkeypatch, tmp_path):
@@ -126,6 +138,52 @@ def test_webhook_persists_event_before_acknowledging(monkeypatch, tmp_path):
     queued = module.support_store.claim_event("event-1")
     assert queued is not None
     assert queued["payload"]["chat_id"] == "chat-1"
+
+
+def test_webhook_rejects_oversized_payload(monkeypatch, tmp_path):
+    module = reload_module(monkeypatch, tmp_path)
+    module.app.config["MAX_CONTENT_LENGTH"] = 32
+
+    response = module.app.test_client().post(
+        "/test-token",
+        data='{"event":"' + ("x" * 64) + '"}',
+        content_type="application/json",
+    )
+
+    assert response.status_code == 413
+    assert response.get_json() == {"error": {"code": "payload_too_large"}}
+
+
+def test_invalid_client_message_log_does_not_include_message_text(monkeypatch, tmp_path, caplog):
+    module = reload_module(monkeypatch, tmp_path)
+
+    module.handle_client_message(
+        {
+            "id": "bad-event",
+            "event": "CLIENT_MESSAGE",
+            "message": {"text": "private customer text"},
+        }
+    )
+
+    assert "private customer text" not in caplog.text
+    assert "bad-event" in caplog.text
+
+
+def test_configured_trusted_hosts_reject_other_hosts(monkeypatch, tmp_path):
+    monkeypatch.setenv("TRUSTED_HOSTS", "bot.example.com")
+    module = reload_module(monkeypatch, tmp_path)
+
+    response = module.app.test_client().get("/health", headers={"Host": "attacker.example"})
+
+    assert response.status_code == 400
+
+
+def test_support_database_has_private_posix_permissions(tmp_path):
+    database_path = tmp_path / "private.sqlite3"
+    SupportStore(database_path)
+
+    if os.name == "posix":
+        assert stat.S_IMODE(database_path.stat().st_mode) == 0o600
 
 
 def test_failed_handoff_is_recorded_and_retried(monkeypatch, tmp_path):

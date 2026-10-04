@@ -1,0 +1,32 @@
+[Unit]
+Description=REDSMS Jivo and OmniDesk support bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=redsms-jivo
+Group=redsms-jivo
+WorkingDirectory=/opt/redsms-jivo
+EnvironmentFile=/etc/redsms-jivo/bot.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/redsms-jivo/.venv/bin/gunicorn --workers 1 --threads 8 --bind 127.0.0.1:8000 --timeout 30 --error-logfile - bot_search_improved:app
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=30
+UMask=0077
+StateDirectory=redsms-jivo
+StateDirectoryMode=0700
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/redsms-jivo
+
+[Install]
+WantedBy=multi-user.target

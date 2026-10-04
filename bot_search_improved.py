@@ -111,6 +111,10 @@ if str(TZ) in {"UTC", "UTC+00:00"} and TIMEZONE_NAME not in {"UTC", "Etc/UTC"}:
     )
 
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = int(os.getenv("MAX_REQUEST_BYTES", str(1024 * 1024)))
+trusted_hosts = [host.strip() for host in os.getenv("TRUSTED_HOSTS", "").split(",") if host.strip()]
+if trusted_hosts:
+    app.config["TRUSTED_HOSTS"] = trusted_hosts
 executor = ThreadPoolExecutor(max_workers=BACKGROUND_WORKERS, thread_name_prefix="jivo-bg")
 http = requests.Session()
 support_store = SupportStore(SUPPORT_DB_PATH)
@@ -502,7 +506,7 @@ def find_template(text: str) -> dict[str, Any] | None:
     msg = _norm(text or "")
     if not msg:
         record_match_metric("not_found")
-        log.info("Поиск шаблона: query=%r result=not_found reason=empty_message", text)
+        log.info("Поиск шаблона: query_chars=0 result=not_found reason=empty_message")
         return None
 
     with _tpl_lock:
@@ -518,18 +522,18 @@ def find_template(text: str) -> dict[str, Any] | None:
                 scored.append((1.0 + max(map(len, matches)) / 100.0, template))
         if not scored:
             record_match_metric("not_found")
-            log.info("Поиск шаблона: query=%r result=not_found reason=no_keyword_match", text)
+            log.info("Поиск шаблона: query_chars=%d result=not_found reason=no_keyword_match", len(msg))
             return None
         scored.sort(key=lambda x: x[0], reverse=True)
         score, template = scored[0]
         record_match_metric("matched")
-        log.info("Поиск шаблона: query=%r result=matched template_id=%s score=%.4f", text, template.get("id"), round(score, 4))
+        log.info("Поиск шаблона: query_chars=%d result=matched template_id=%s score=%.4f", len(msg), template.get("id"), round(score, 4))
         return {"id": template.get("id"), "text": template["text"], "score": round(score, 4)}
 
     query = _tokens(msg)
     if not query:
         record_match_metric("not_found")
-        log.info("Поиск шаблона: query=%r result=not_found reason=no_tokens_after_normalization", text)
+        log.info("Поиск шаблона: query_chars=%d result=not_found reason=no_tokens_after_normalization", len(msg))
         return None
     fuzzy = _fuzzy_map(query, set(idf))
     query = [fuzzy.get(t, t) for t in query]
@@ -542,7 +546,7 @@ def find_template(text: str) -> dict[str, Any] | None:
             scored.append((score, template))
     if not scored:
         record_match_metric("not_found")
-        log.info("Поиск шаблона: query=%r result=not_found reason=no_template_score", text)
+        log.info("Поиск шаблона: query_chars=%d result=not_found reason=no_template_score", len(msg))
         return None
 
     scored.sort(key=lambda x: x[0], reverse=True)
@@ -550,7 +554,7 @@ def find_template(text: str) -> dict[str, Any] | None:
     threshold = MATCH_THRESHOLD - (0.04 if set(query) & _STRONG else 0.0)
     if best_score < threshold:
         record_match_metric("not_found")
-        log.info("Поиск шаблона: query=%r result=not_found reason=below_threshold score=%.4f threshold=%.4f", text, best_score, threshold)
+        log.info("Поиск шаблона: query_chars=%d result=not_found reason=below_threshold score=%.4f threshold=%.4f", len(msg), best_score, threshold)
         return None
 
     if len(scored) > 1:
@@ -559,8 +563,8 @@ def find_template(text: str) -> dict[str, Any] | None:
         if best_score - second_score < required_margin and best.get("id") != second.get("id"):
             record_match_metric("ambiguous")
             log.info(
-                "Поиск шаблона: query=%r result=ambiguous best=%s %.3f second=%s %.3f",
-                text,
+                "Поиск шаблона: query_chars=%d result=ambiguous best=%s %.3f second=%s %.3f",
+                len(msg),
                 best.get("id"),
                 best_score,
                 second.get("id"),
@@ -569,7 +573,7 @@ def find_template(text: str) -> dict[str, Any] | None:
             return None
 
     record_match_metric("matched")
-    log.info("Поиск шаблона: query=%r result=matched template_id=%s score=%.4f fuzzy=%s", text, best.get("id"), best_score, fuzzy)
+    log.info("Поиск шаблона: query_chars=%d result=matched template_id=%s score=%.4f fuzzy_tokens=%d", len(msg), best.get("id"), best_score, len(fuzzy))
     return {
         "id": best.get("id"),
         "title": best.get("title"),
@@ -727,7 +731,12 @@ def handle_client_message(data: dict[str, Any]) -> None:
     client_id = required_str(data, "client_id")
     chat_id = required_str(data, "chat_id")
     if not client_id or not chat_id:
-        log.error("CLIENT_MESSAGE без client_id/chat_id: %r", data)
+        log.error(
+            "CLIENT_MESSAGE без обязательных идентификаторов: event_id=%s client_id_present=%s chat_id_present=%s",
+            required_str(data, "id") or "-",
+            bool(client_id),
+            bool(chat_id),
+        )
         return
 
     if is_working_time():
@@ -796,7 +805,12 @@ def handle_agent_unavailable(data: dict[str, Any]) -> None:
     client_id = required_str(data, "client_id")
     chat_id = required_str(data, "chat_id")
     if not client_id or not chat_id:
-        log.error("AGENT_UNAVAILABLE без client_id/chat_id: %r", data)
+        log.error(
+            "AGENT_UNAVAILABLE без обязательных идентификаторов: event_id=%s client_id_present=%s chat_id_present=%s",
+            required_str(data, "id") or "-",
+            bool(client_id),
+            bool(chat_id),
+        )
         return
     auto_reply_once(client_id, chat_id)
 
@@ -1022,6 +1036,11 @@ def metrics():
     return jsonify(get_match_metrics())
 
 
+@app.errorhandler(413)
+def request_too_large(_error):
+    return jsonify(error={"code": "payload_too_large"}), 413
+
+
 recovery_thread = threading.Thread(
     target=recovery_worker,
     name="support-recovery",
@@ -1031,6 +1050,4 @@ recovery_thread.start()
 
 
 if __name__ == "__main__":
-    # Для production лучше запускать через gunicorn/uwsgi.
-    # Если используется MemoryState, держите 1 worker-процесс.
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")), threaded=True)
+    app.run(host="127.0.0.1", port=int(os.getenv("PORT", "8000")), threaded=True)

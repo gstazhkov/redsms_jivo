@@ -7,10 +7,15 @@ __pycache__/
 .ruff_cache/
 *.sqlite
 *.sqlite3
+*-wal
+*-shm
 *.db
 *.log
 .env
 .env.*
 !.env.example
+*.pem
+*.key
+secrets/
 .vscode/
 .idea/
